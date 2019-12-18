@@ -21,80 +21,195 @@
 
 namespace PHPCuong\ProductReviewForm\Override\Review\Block;
 
+use Magento\Catalog\Model\Product;
+use Magento\Customer\Model\Context;
+use Magento\Customer\Model\Url;
+
 class Form extends \Magento\Review\Block\Form
 {
-    /**
-     * Initialize review form
+	/**
+     * Customer Session Factory
      *
-     * @return void
+     * @var \Magento\Customer\Model\SessionFactory
      */
-    protected function _construct()
-    {
-        parent::_construct();
-        // If the current product doesn't exist in the orders of the current customer
-        if (!$this->getAlreadyPurchasedProduct()) {
-            $this->setTemplate('PHPCuong_ProductReviewForm::review/form.phtml');
-        } else {
-            $this->setTemplate('Magento_Review::form.phtml');
-        }
-    }
+	protected $_customerSession;
+	/**
+     * Order Collection Factory
+     *
+     * @var \Magento\Sales\Model\ResourceModel\Order\CollectionFactory
+     */
+	protected $_orderCollectionFactory;
+	/**
+     * Registry
+     *
+     * @var \Magento\Framework\Registry
+     */
+	protected $_registry;
+	/**
+     * Review data
+     *
+     * @var \Magento\Review\Helper\Data
+     */
+    protected $_reviewData = null;
 
     /**
-     * Retrieve the current customer purchased the current product.
+     * Catalog product model
      *
-     * @return boolean
+     * @var \Magento\Catalog\Api\ProductRepositoryInterface
      */
-    private function getAlreadyPurchasedProduct()
-    {
-        // If is Guest then hide the review form
-        if (!$this->getCustomerId()) {
-            return false;
-        }
-        try {
-            $product = $this->getProductInfo();
-            $orders = $this->getCustomerOrders();
-            foreach ($orders as $order) {
-                // Get all visible items in the order
-                /** @var $items \Magento\Sales\Api\Data\OrderItemInterface[] **/
-                $items = $order->getAllVisibleItems();
-                // Loop all items
-                foreach ($items as $item) {
-                    // Check whether the current product exist in the order.
-                    if ($item->getProductId() == $product->getId()) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        } catch (\Exception $e) {
-            return false;
-        }
-    }
+    protected $productRepository;
 
     /**
-     * Retrieve the orders of the current customer. Only get orders are completed
+     * Rating model
      *
-     * @return \Magento\Sales\Model\Order[]
+     * @var \Magento\Review\Model\RatingFactory
      */
-    private function getCustomerOrders()
-    {
-        $order = \Magento\Framework\App\ObjectManager::getInstance()->get(\Magento\Sales\Model\OrderFactory::class);
-        $orderCollection = $order->create()->getCollection()->addFieldToFilter(
-            'customer_id', $this->getCustomerId()
-        )->addFieldToFilter(
-            'status', \Magento\Sales\Model\Order::STATE_COMPLETE
+    protected $_ratingFactory;
+
+    /**
+     * @var \Magento\Framework\Url\EncoderInterface
+     */
+    protected $urlEncoder;
+
+    /**
+     * Message manager interface
+     *
+     * @var \Magento\Framework\Message\ManagerInterface
+     */
+    protected $messageManager;
+
+    /**
+     * @var \Magento\Framework\App\Http\Context
+     */
+    protected $httpContext;
+
+    /**
+     * @var \Magento\Customer\Model\Url
+     */
+    protected $customerUrl;
+
+    /**
+     * @var array
+     */
+    protected $jsLayout;
+
+    /**
+     * @var \Magento\Framework\Serialize\Serializer\Json
+     */
+    private $serializer;
+
+    /**
+     * Form constructor.
+     *
+     * @param \Magento\Framework\View\Element\Template\Context $context
+     * @param \Magento\Framework\Url\EncoderInterface $urlEncoder
+     * @param \Magento\Review\Helper\Data $reviewData
+     * @param \Magento\Catalog\Api\ProductRepositoryInterface $productRepository
+     * @param \Magento\Review\Model\RatingFactory $ratingFactory
+     * @param \Magento\Framework\Message\ManagerInterface $messageManager
+     * @param \Magento\Framework\App\Http\Context $httpContext
+     * @param Url $customerUrl
+     * @param array $data
+     * @param \Magento\Framework\Serialize\Serializer\Json|null $serializer
+     * @throws \RuntimeException
+     * @SuppressWarnings(PHPMD.ExcessiveParameterList)
+     */
+	public function __construct(
+		\Magento\Framework\View\Element\Template\Context $context,
+        \Magento\Framework\Url\EncoderInterface $urlEncoder,
+        \Magento\Review\Helper\Data $reviewData,
+        \Magento\Catalog\Api\ProductRepositoryInterface $productRepository,
+        \Magento\Review\Model\RatingFactory $ratingFactory,
+        \Magento\Framework\Message\ManagerInterface $messageManager,
+        \Magento\Framework\App\Http\Context $httpContext,
+        \Magento\Customer\Model\Url $customerUrl,
+        array $data = [],
+        \Magento\Framework\Serialize\Serializer\Json $serializer = null,
+		\Magento\Customer\Model\SessionFactory $customerSession,
+		\Magento\Sales\Model\ResourceModel\Order\CollectionFactory $orderCollectionFactory,
+		\Magento\Framework\Registry $registry
+	) {
+		$this->urlEncoder = $urlEncoder;
+		$this->_customerSession = $customerSession;
+		$this->_reviewData = $reviewData;
+		$this->_orderCollectionFactory = $orderCollectionFactory;
+		$this->_registry = $registry;
+		$this->httpContext = $httpContext;
+		parent::__construct($context, $urlEncoder, $reviewData, $productRepository, $ratingFactory, $messageManager, $httpContext, $customerUrl, $data);
+		$this->jsLayout = isset($data['jsLayout']) ? $data['jsLayout'] : [];
+		$this->serializer = $serializer ?: \Magento\Framework\App\ObjectManager::getInstance()
+            ->get(\Magento\Framework\Serialize\Serializer\Json::class);
+	}
+
+	protected function _construct()
+	{
+		parent::_construct();
+
+		$this->setAllowWriteReviewFlag(
+        $this->httpContext->getValue(Context::CONTEXT_AUTH)
+        || $this->_reviewData->getIsGuestAllowToWrite()
+    );
+    if (!$this->getAllowWriteReviewFlag()) {
+        $queryParam = $this->urlEncoder->encode(
+            $this->getUrl('*/*/*', ['_current' => true]) . '#review-form'
         );
-        return $orderCollection;
-    }
+        $this->setLoginLink(
+            $this->getUrl(
+                'customer/account/login/',
+                [Url::REFERER_QUERY_PARAM_NAME => $queryParam]
+            )
+        );
 
-    /**
-     * Returns customer id from session
-     *
-     * @return int
-     */
-    private function getCustomerId()
-    {
-        $customerSession = \Magento\Framework\App\ObjectManager::getInstance()->get(\Magento\Customer\Model\SessionFactory::class);
-        return $customerSession->create()->getId();
+				$this->setTemplate('Magento_Review::form.phtml');
+
     }
+		else {
+			if ($this->isCurrentCustomerPurchasedThisProduct()) {
+				$this->setTemplate('Magento_Review::form.phtml');
+			} else {
+					$this->setTemplate('PHPCuong_ProductReviewForm::review/form.phtml');
+					// You can set null here if you don't want to load any template
+					// $this->setTemplate(null);
+			}
+		}
+	}
+
+	public function getCurrentCustomerId()
+	{
+		return $this->_customerSession->create()->getCustomer()->getId();
+	}
+
+	public function getCustomerOrders()
+	{
+		$orders = $this->_orderCollectionFactory->create()->addFieldToSelect(
+            '*'
+        )->addFieldToFilter(
+            'customer_id',
+            $this->getCurrentCustomerId()
+        );
+
+        return $orders;
+	}
+
+	public function getCurrentProduct()
+	{
+		return $this->_registry->registry('current_product');
+	}
+
+	public function isCurrentCustomerPurchasedThisProduct()
+	{
+		$product_ids = [];
+
+		foreach ($this->getCustomerOrders() as $order) {
+		    foreach ($order->getAllVisibleItems() as $item) {
+		        $product_ids[$item->getProductId()] = $item->getProductId();
+		    }
+		}
+
+		if (in_array($this->getCurrentProduct()->getId(), $product_ids)) {
+			return true;
+		} else {
+			return false;
+		}
+	}
 }
